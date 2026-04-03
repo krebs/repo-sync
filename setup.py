@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name = "repo-sync",
-    version = "0.2.7",
+    version = "1.0.0",
     author = "makefu",
     author_email = "github@syntax-fehler.de",
     description = ("Sync remotes to other remotes."),
