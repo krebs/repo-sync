@@ -13,6 +13,8 @@ Configuration:
     $name.origin.ref defaults to "heads/master"
     $name.mirror.ref defaults to "heads/${name}"
 
+    If $name.smart is true, the mirror gets pushed only when origin changes.
+
     A special "@latest" entry defines where the ref with the latest
     update is pushed to the mirror-url.
     @latest.mirror.ref defaults to "heads/master"
@@ -53,18 +55,45 @@ def load_config(fname):
     with open(fname) as f:
         return json.load(f)
 
+
+def ensure_remote(repo: Repo, name: str, remote_url: str):
+    try:
+        remote = repo.remote(name)
+    except ValueError:
+        return repo.create_remote(name, remote_url)
+    urls = list(remote.urls)
+    if urls != [remote_url]:
+        remote.set_url(new_url=remote_url, old_url=urls[0])
+        for extra_url in urls[1:]:
+            remote.delete_url(extra_url)
+    return remote
+
+
+def equal_refs(repo, ref1, ref2):
+    try: hexsha1 = repo.commit(ref1).hexsha
+    except Exception: return False
+    try: hexsha2 = repo.commit(ref2).hexsha
+    except Exception: return False
+    return hexsha1 == hexsha2
+
+
+def to_remote_ref(ref, remote):
+    prefix = "refs/heads/"
+    if ref.startswith(prefix):
+        return f"refs/remotes/{remote}/{ref[len(prefix):]}"
+    raise ValueError(f"Not a heads ref: {ref}")
+
+
 def sync_ref(repo,k,v):
     log.info("begin sync of {}".format(k))
     oname = k
     mname = oname+'-mirror'
     ourl = v['origin']['url']
     murl = v['mirror']['url']
+    smart = v.get('smart', False)
 
-    # it is easier to ask for forgiveness than to ask for permission
-    try: repo.delete_remote(oname)
-    except git.exc.GitCommandError: pass
-    try: repo.delete_remote(mname)
-    except git.exc.GitCommandError: pass
+    oremote = ensure_remote(repo, oname, ourl)
+    mremote = ensure_remote(repo, mname, murl)
 
     # Step 1: fetch remote_ref:local_ref
     # Step 2: push local_ref:mirror_ref
@@ -72,19 +101,21 @@ def sync_ref(repo,k,v):
             else 'refs/heads/master'
     local_ref = "refs/remotes/{}/master".format(oname)
     refspec = "+{}:{}".format(remote_ref,local_ref)
-    oremote = repo.create_remote(oname,url=ourl)
     log.info("fetching refspec {}".format(refspec))
     fetch = oremote.fetch(refspec=refspec)[0]
     print("{} - {}".format(fetch.commit.summary,datetime.fromtimestamp(fetch.commit.committed_date)))
-
-    mremote = repo.create_remote(mname,murl)
 
     mirror_ref = "refs/" + v['mirror']['ref'] if 'ref' in v['mirror'] \
             else "refs/heads/{}".format(oname)
 
     mrefspec = "{}:{}".format(local_ref,mirror_ref)
-    log.info("pushing refspec {}".format(mrefspec))
-    mremote.push(refspec=mrefspec,force=True)
+
+    if smart and equal_refs(repo, local_ref, to_remote_ref(mirror_ref, mname)):
+        log.info("not pushing up-to-date refspec {}".format(mrefspec))
+    else:
+        log.info("pushing refspec {}".format(mrefspec))
+        mremote.push(refspec=mrefspec,force=True)
+
     return { "mirror_ref": mirror_ref,
              "remote_ref": remote_ref,
              "local_ref": local_ref,
